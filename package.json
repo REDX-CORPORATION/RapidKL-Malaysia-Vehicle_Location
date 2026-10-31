@@ -1,0 +1,19 @@
+{
+  "name": "jomnaik",
+  "version": "2.0.0",
+  "description": "Live bus tracker for RapidKL, Rapid Penang and Rapid Kuantan. Search a bus number, see where it is and where it goes.",
+  "private": true,
+  "author": "Red-X Corporation (jitu)",
+  "engines": { "node": "24.x" },
+  "scripts": {
+    "dev": "node dev.js",
+    "data": "node scripts/build-data.mjs",
+    "vercel-dev": "vercel dev"
+  },
+  "dependencies": {
+    "socket.io-client": "^4.7.5"
+  },
+  "devDependencies": {
+    "express": "^4.19.2"
+  }
+}
