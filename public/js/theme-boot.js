@@ -3,7 +3,8 @@
   var style = 'auto', dark = false;
   try {
     style = localStorage.getItem('jomnaik:style') || 'auto';
-    dark = style === 'dark' || ((style === 'auto' || style === 'osm') && matchMedia('(prefers-color-scheme: dark)').matches);
+    if (style !== 'light' && style !== 'dark') style = 'auto';
+    dark = style === 'dark' || (style === 'auto' && matchMedia('(prefers-color-scheme: dark)').matches);
   } catch (e) {}
   var d = document.documentElement;
   d.dataset.theme = dark ? 'dark' : 'light';

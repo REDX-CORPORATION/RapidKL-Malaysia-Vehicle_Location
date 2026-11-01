@@ -50,7 +50,8 @@ export function createUI(hd) {
   };
   $('#app-version').textContent = VERSION;
 
-  const S = { routes: [], inRoute: false, focused: false, q: '', matches: [], active: -1, kind: 'all', tab: 'buses' };
+  const S = { routes: [], inRoute: false, focused: false, q: '', matches: [], active: -1, kind: 'all', tab: 'buses', live: new Map(), liveSig: '' };
+  const liveTags = new Set();
 
   // ───────────── LED board ─────────────
   let ledText = null, ledSource = '';
@@ -107,29 +108,60 @@ export function createUI(hd) {
   function chip(name, cls = '') {
     return h('span', { class: ('rt ' + cls + (String(name).length > 5 ? ' long' : '')).trim() }, name);
   }
+  function liveTag(name) {
+    const el = h('span', { class: 'live-tag' });
+    const n = S.live.get(name) || 0;
+    el.hidden = !n;
+    el.textContent = n + ' live';
+    liveTags.add({ el, name });
+    return el;
+  }
   function routeRow(r, q = '', idx = -1) {
     const title = r.label || `Route ${r.name}`;
     const sub = [KIND_LABEL[r.kind], r.s ? `${r.s} stops` : null].filter(Boolean).join(' · ');
     const row = h('button', { class: 'row', type: 'button', role: idx >= 0 ? 'option' : null, id: idx >= 0 ? 'opt-' + idx : null, 'aria-selected': idx >= 0 ? 'false' : null, tabindex: idx >= 0 ? '-1' : null },
       chip(r.name),
-      h('span', null, h('span', { class: 't' }, highlight(title, q)), sub ? h('span', { class: 's' }, sub) : null));
+      h('span', null, h('span', { class: 't' }, highlight(title, q)), h('span', { class: 's' }, liveTag(r.name), sub)));
     row.addEventListener('mousedown', (e) => e.preventDefault()); // keep input focus until click lands
     row.addEventListener('click', () => pick(r));
     return row;
   }
+  function busRow(b, q, idx) {
+    const row = h('button', { class: 'row veh', type: 'button', role: 'option', id: 'opt-' + idx, 'aria-selected': 'false', tabindex: '-1' },
+      chip(b.route || '?'),
+      h('span', null, h('span', { class: 't' }, 'Bus ', highlight(b.id, q)), h('span', { class: 's' }, `Route ${b.route || '?'} · live now · tap to track`)));
+    row.addEventListener('mousedown', (e) => e.preventDefault());
+    row.addEventListener('click', () => choose({ type: 'bus', b }));
+    return row;
+  }
+
+  /** Called every poll with { routeName -> live bus count }. Cheap: only touches the small count labels. */
+  function setLiveCounts(map) {
+    S.live = map;
+    for (const t of [...liveTags]) {
+      if (!t.el.isConnected) { liveTags.delete(t); continue; }
+      const n = map.get(t.name) || 0;
+      t.el.hidden = !n;
+      t.el.textContent = n + ' live';
+    }
+    const sig = [...map.keys()].sort().join('|');
+    if (sig !== S.liveSig) { S.liveSig = sig; if (S.routes.length) setRoutes(S.routes, { note: S.note }); }
+  }
 
   function setRoutes(routes, { note } = {}) {
     S.routes = routes;
+    S.note = note;
     const kinds = [...new Set(routes.map((r) => r.kind).filter(Boolean))];
-    if (kinds.length > 1) {
+    const hasLive = S.live.size > 0;
+    if (kinds.length > 1 || hasLive) {
       clear(el.kindSeg).hidden = false;
-      const opts = [['all', 'All'], ...kinds.map((k) => [k, k === 'feeder' ? 'Feeder' : k === 'brt' ? 'BRT' : 'City'])];
+      const opts = [['all', 'All'], ...(hasLive ? [['live', 'Live']] : []), ...kinds.map((k) => [k, k === 'feeder' ? 'Feeder' : k === 'brt' ? 'BRT' : 'City'])];
       if (!opts.some(([k]) => k === S.kind)) S.kind = 'all';
       for (const [k, label] of opts) {
         el.kindSeg.append(h('button', { type: 'button', 'aria-pressed': String(S.kind === k), onclick: () => { S.kind = k; setRoutes(S.routes, { note }); } }, label));
       }
     } else { el.kindSeg.hidden = true; S.kind = 'all'; }
-    const shown = S.kind === 'all' ? routes : routes.filter((r) => r.kind === S.kind);
+    const shown = S.kind === 'all' ? routes : S.kind === 'live' ? routes.filter((r) => S.live.get(r.name) > 0) : routes.filter((r) => r.kind === S.kind);
     el.routeCount.textContent = shown.length;
     const frag = document.createDocumentFragment();
     for (const r of shown) frag.append(routeRow(r));
@@ -157,16 +189,24 @@ export function createUI(hd) {
 
   // ───────────── search (combobox) ─────────────
   function renderResults() {
-    S.matches = rank(S.routes, S.q);
+    const routes = rank(S.routes, S.q).map((r) => ({ type: 'route', r }));
+    const vq = norm(S.q);
+    const buses = vq.length >= 3 && hd.findBuses ? hd.findBuses(vq).map((b) => ({ type: 'bus', b })) : [];
+    S.matches = [...routes, ...buses];
     S.active = S.matches.length ? 0 : -1;
     clear(el.results);
     if (!S.matches.length) {
       el.results.append(h('li', { role: 'presentation', class: 'empty' },
         h('span', { class: 'badge' }, icon('bus')),
-        h('strong', null, `No route matches “${S.q.trim()}”`),
-        h('span', null, 'Check the number on the front of the bus, or try a place name. Press Enter to look it up anyway.')));
+        h('strong', null, `No route or bus matches “${S.q.trim()}”`),
+        h('span', null, 'Check the number on the front of the bus. Press Enter to look it up anyway; new routes can take a moment to appear.')));
     } else {
-      S.matches.forEach((r, i) => el.results.append(h('li', { role: 'presentation' }, routeRow(r, S.q, i))));
+      let i = 0;
+      routes.forEach((m) => el.results.append(h('li', { role: 'presentation' }, routeRow(m.r, S.q, i++))));
+      if (buses.length) {
+        el.results.append(h('li', { role: 'presentation', class: 'list-label' }, 'Vehicles'));
+        buses.forEach((m) => el.results.append(h('li', { role: 'presentation' }, busRow(m.b, S.q, i++))));
+      }
       markActive();
     }
     el.q.setAttribute('aria-expanded', String(S.matches.length > 0));
@@ -180,12 +220,13 @@ export function createUI(hd) {
     });
     if (S.active < 0) el.q.removeAttribute('aria-activedescendant');
   }
-  function pick(r) {
+  function choose(item) {
     S.q = ''; el.q.value = ''; S.matches = [];
     el.q.blur(); S.focused = false;
     updateView();
-    hd.onPick(r);
+    if (item.type === 'bus') hd.onPickBus(item.b); else hd.onPick(item.r || item);
   }
+  const pick = (r) => choose({ type: 'route', r });
 
   el.q.addEventListener('input', () => {
     S.q = el.q.value.trim() ? el.q.value : '';
@@ -202,7 +243,7 @@ export function createUI(hd) {
     else if (e.key === 'ArrowUp' && S.matches.length) { e.preventDefault(); S.active = (S.active - 1 + S.matches.length) % S.matches.length; markActive(); }
     else if (e.key === 'Enter') {
       e.preventDefault();
-      if (S.matches[S.active]) pick(S.matches[S.active]);
+      if (S.matches[S.active]) choose(S.matches[S.active]);
       else if (/^[\w .()&-]{1,40}$/.test(S.q.trim())) pick({ name: S.q.trim().toUpperCase(), adhoc: true });
     } else if (e.key === 'Escape') { el.q.value = ''; S.q = ''; el.q.blur(); updateView(); }
   });
@@ -280,7 +321,7 @@ export function createUI(hd) {
     setCounts({ buses: sorted.length });
   }
   function clearBuses() { busRows.clear(); busOrder = ''; clear(el.busList); }
-  function showBusEmpty(kind, route) {
+  function showBusEmpty(kind, route, kioskUrl) {
     el.busEmpty.hidden = !kind;
     if (!kind) return;
     clear(el.busEmpty);
@@ -291,7 +332,8 @@ export function createUI(hd) {
     };
     const [t, s] = msgs[kind];
     put(el.busEmpty, h('span', { class: 'badge' }, icon('bus')), h('strong', null, t), h('span', null, s),
-      kind === 'none' ? h('button', { type: 'button', class: 'ghost', onclick: () => { el.q.focus(); } }, 'Try another route') : null);
+      kind === 'none' ? h('button', { type: 'button', class: 'ghost', onclick: () => { el.q.focus(); } }, 'Try another route') : null,
+      kind === 'none' && kioskUrl ? h('a', { class: 'btn-link', href: kioskUrl, target: '_blank', rel: 'noopener noreferrer' }, 'Check this route on the myRapid kiosk ↗') : null);
   }
 
   // — stops —
@@ -305,7 +347,7 @@ export function createUI(hd) {
       dirs.forEach((d, i) => el.dirSeg.append(h('button', { type: 'button', 'aria-pressed': String(i === activeDir), onclick: () => hd.onDir(i) }, d.label)));
     }
     const d = dirs[activeDir];
-    if (!d) { el.stopsNote.textContent = note || 'Stop list isn’t available for this route yet.'; return; }
+    if (!d) { baseNote = note || 'Stop list isn’t available for this route yet.'; applyStopsNote(); return; }
     d.stops.forEach((s, i) => {
       const host = h('span', { class: 'pips' });
       const text = h('span', null, h('span', { class: 'nm' }, s.name), s.code ? h('span', { class: 'cd' }, '  ' + s.code) : null);
@@ -316,7 +358,7 @@ export function createUI(hd) {
       pipHosts.set(s.key, { host, sig: '' });
       stopRows.set(s.key, li);
     });
-    el.stopsNote.textContent = note || '';
+    baseNote = note || ''; applyStopsNote();
   }
   function updatePips(byKey) {
     for (const [key, p] of pipHosts) {
@@ -339,6 +381,9 @@ export function createUI(hd) {
       h('button', { type: 'button', onclick: () => hd.onStopPick(info.stop) }, 'Show'));
     el.nearYou.hidden = false;
   }
+  function setLineNote(t) { S.lineNote = t || ''; applyStopsNote(); }
+  let baseNote = '';
+  function applyStopsNote() { el.stopsNote.textContent = [baseNote, S.lineNote].filter(Boolean).join(' '); }
   function scrollToStop(key) { stopRows.get(key)?.scrollIntoView({ block: 'center', behavior: reduceMotion.matches ? 'auto' : 'smooth' }); }
 
   // ───────────── status / toast ─────────────
@@ -381,7 +426,7 @@ export function createUI(hd) {
   function setRegion(code) { region = code; el.regionName.textContent = PROVIDERS[code].name; }
 
   let styleKey = 'auto';
-  const STYLES = [['auto', 'Automatic', 'Follows your device'], ['light', 'Light', 'CARTO Voyager'], ['dark', 'Dark', 'CARTO Dark Matter'], ['osm', 'OpenStreetMap', 'Standard OSM tiles']];
+  const STYLES = [['auto', 'Automatic', 'Follows your device'], ['light', 'Light', 'OpenStreetMap standard'], ['dark', 'Dark', 'OpenStreetMap, dimmed']];
   const closeStyle = popMenu(el.styleBtn, el.styleMenu, () => {
     clear(el.styleMenu);
     for (const [k, label, sub] of STYLES) {
@@ -408,9 +453,9 @@ export function createUI(hd) {
   });
 
   return {
-    el, setRoutes, setRoutesLoading, renderRecent, setMode, setLed, setLedText, setRouteHeader, setCounts, setTab,
+    el, setRoutes, setLiveCounts, setRoutesLoading, renderRecent, setMode, setLed, setLedText, setRouteHeader, setCounts, setTab,
     renderBuses, clearBuses, showBusEmpty, renderStops, updatePips, setNearYou, scrollToStop,
-    setStatus, toast, setRegion, setStyleKey, closeRegion, focusSearch: () => el.q.focus(),
+    setLineNote, setStatus, toast, setRegion, setStyleKey, closeRegion, focusSearch: () => el.q.focus(),
     get tab() { return S.tab; }, get inRoute() { return S.inRoute; },
   };
 }

@@ -46,3 +46,6 @@ export function compareRoutes(a, b) {
   if (da !== db) return da ? -1 : 1;
   return String(a).localeCompare(String(b), 'en', { numeric: true, sensitivity: 'base' });
 }
+
+/** The kiosk lists some routes as "750 (OS)"; the live feed calls them "750". Compare on the base name. */
+export const normRoute = (s) => String(s == null ? '' : s).replace(/\s*\(OS\)\s*$/i, '').trim().toUpperCase();

@@ -38,3 +38,12 @@ export function routeMeta(slug) {
   }
   return metaCache.get(slug);
 }
+
+// ---- road-following lines ----
+/** One chunk of a traced line. src = { slug } or { provider, id }. */
+export function line(src, dir, part, signal) {
+  const q = src.slug ? `slug=${enc(src.slug)}` : `provider=${enc(src.provider)}&id=${enc(src.id)}`;
+  return getJSON(`/api/line?${q}&dir=${dir}&part=${part}`, { signal, timeout: 12000 });
+}
+/** Pre-computed lines (npm run lines). */
+export const staticLine = (slug) => getJSON(`/data/lines/${enc(slug)}.json`);

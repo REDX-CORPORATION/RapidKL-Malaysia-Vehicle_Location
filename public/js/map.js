@@ -27,7 +27,7 @@ export function createMap(el, { getInsets, onBusTap, onStopTap, onTrackRoute, on
   function refreshPalette() {
     pal = {
       route: cssVar('--route'), casing: cssVar('--casing'), stopFill: cssVar('--stop-fill'),
-      dotStroke: cssVar('--dot-stroke'), live: cssVar('--live'),
+      dotStroke: cssVar('--dot-stroke'), live: cssVar('--live'), trail: cssVar('--trail'),
     };
   }
   refreshPalette();
@@ -46,6 +46,7 @@ export function createMap(el, { getInsets, onBusTap, onStopTap, onTrackRoute, on
   // ── layers ──
   const netLayer = L.layerGroup().addTo(map);
   const routeLayer = L.layerGroup().addTo(map);
+  const trailLayer = L.layerGroup().addTo(map);
   const busLayer = L.layerGroup().addTo(map);
   const focusLayer = L.layerGroup().addTo(map);
   const meLayer = L.layerGroup().addTo(map);
@@ -128,14 +129,23 @@ export function createMap(el, { getInsets, onBusTap, onStopTap, onTrackRoute, on
     routeLayer.clearLayers(); lineLayers = []; stopLayers = []; clearFocus();
   }
 
-  /** lines: [[ [lat,lng], ... ], ...]  stops: [{name, code, lat, lng, end?, extra?}] */
-  function showRoute({ lines, stops }) {
-    clearRoute();
-    const all = [];
+  function drawLines(lines) {
+    lineLayers.forEach(({ l }) => routeLayer.removeLayer(l));
     const casings = lines.map((pts) => L.polyline(pts, { color: pal.casing, weight: 10, opacity: 0.92, lineCap: 'round', lineJoin: 'round', interactive: false }));
     const strokes = lines.map((pts) => L.polyline(pts, { color: pal.route, weight: 5.5, opacity: 0.95, lineCap: 'round', lineJoin: 'round', interactive: false }));
     casings.forEach((l) => l.addTo(routeLayer)); strokes.forEach((l) => l.addTo(routeLayer));
     lineLayers = [...casings.map((l) => ({ l, kind: 'casing' })), ...strokes.map((l) => ({ l, kind: 'line' }))];
+    // keep stops drawn on top of the line (matters when the line is replaced after the stops exist)
+    lineLayers.slice().reverse().forEach(({ l }) => l.bringToBack());
+  }
+  /** Swap the route line in place (used when a road-traced line replaces the first straight one). */
+  function setLines(lines) { drawLines(lines); }
+
+  /** lines: [[ [lat,lng], ... ], ...]  stops: [{name, code, lat, lng, end?, extra?}] */
+  function showRoute({ lines, stops }) {
+    clearRoute();
+    const all = [];
+    drawLines(lines);
     lines.forEach((pts) => all.push(...pts));
 
     // extras first so the real stops draw on top
@@ -154,6 +164,7 @@ export function createMap(el, { getInsets, onBusTap, onStopTap, onTrackRoute, on
     refreshPalette();
     lineLayers.forEach(({ l, kind }) => l.setStyle({ color: kind === 'casing' ? pal.casing : pal.route }));
     stopLayers.forEach((m) => m.setStyle(stopStyle(m._stop)));
+    for (const e of buses.values()) if (e.trailLine) e.trailLine.setStyle({ color: pal.trail });
     for (const m of dots.values()) m.setStyle(dotStyle(m._bus));
   }
 
@@ -169,7 +180,7 @@ export function createMap(el, { getInsets, onBusTap, onStopTap, onTrackRoute, on
 
   // ── live buses (selected route): DOM markers that glide between fixes ──
   const buses = new Map(); // id -> { marker, root, rot, anim, hasBearing }
-  let selectedId = null, followId = null, followAfter = 0, raf = 0;
+  let selectedId = null, followId = null, followAfter = 0, raf = 0, showTrails = false;
 
   function makeBus(b) {
     const root = h('div', { class: 'bus' }, h('span', { class: 'bus-arrow' }), h('span', { class: 'bus-disc' }, icon('bus')), h('span', { class: 'bus-tag' }, b.id));
@@ -179,7 +190,7 @@ export function createMap(el, { getInsets, onBusTap, onStopTap, onTrackRoute, on
     });
     marker.on('click', () => onBusTap && onBusTap(b.id));
     marker.addTo(busLayer);
-    return { marker, root, rot: 0, anim: null, hasBearing: false };
+    return { marker, root, rot: 0, anim: null, hasBearing: false, trail: [[b.lat, b.lng]], trailLine: null };
   }
 
   function paintBus(e, b) {
@@ -207,15 +218,29 @@ export function createMap(el, { getInsets, onBusTap, onStopTap, onTrackRoute, on
           e.rot += delta; e.hasBearing = true;
           e.root.style.setProperty('--rot', e.rot.toFixed(0) + 'deg');
         }
+        if (moved > 8) { e.trail.push([b.lat, b.lng]); if (e.trail.length > 80) e.trail.shift(); }
         if (moved > 1) {
           if (reduceMotion.matches || moved > 3000) e.marker.setLatLng([b.lat, b.lng]);
           else e.anim = { from, to: L.latLng(b.lat, b.lng), t0: now, dur: 2200 };
         }
       }
       paintBus(e, b);
+      drawTrail(e, b);
     }
-    for (const [id, e] of buses) if (!seen.has(id)) { busLayer.removeLayer(e.marker); buses.delete(id); if (followId === id) stopFollow(); }
+    for (const [id, e] of buses) if (!seen.has(id)) { busLayer.removeLayer(e.marker); if (e.trailLine) trailLayer.removeLayer(e.trailLine); buses.delete(id); if (followId === id) stopFollow(); }
     if (!raf) raf = requestAnimationFrame(step);
+  }
+
+  /** A short breadcrumb behind each bus. Shown only when a route has no road-accurate line, so the path still reads. */
+  function drawTrail(e, b) {
+    const on = showTrails && !b.stale && e.trail.length >= 3;
+    if (!on) { if (e.trailLine) { trailLayer.removeLayer(e.trailLine); e.trailLine = null; } return; }
+    if (!e.trailLine) e.trailLine = L.polyline(e.trail, { color: pal.trail, weight: 3.5, opacity: 0.85, lineCap: 'round', lineJoin: 'round', interactive: false }).addTo(trailLayer);
+    else e.trailLine.setLatLngs(e.trail);
+  }
+  function setTrails(on) {
+    showTrails = !!on;
+    for (const e of buses.values()) drawTrail(e, { stale: false });
   }
 
   function step(now) {
@@ -234,7 +259,7 @@ export function createMap(el, { getInsets, onBusTap, onStopTap, onTrackRoute, on
   }
 
   function clearBuses() {
-    busLayer.clearLayers(); buses.clear(); selectedId = null; stopFollow();
+    busLayer.clearLayers(); trailLayer.clearLayers(); buses.clear(); selectedId = null; stopFollow();
   }
   function setSelected(id) {
     selectedId = id;
@@ -282,7 +307,7 @@ export function createMap(el, { getInsets, onBusTap, onStopTap, onTrackRoute, on
   return {
     map, setBase, restyle, fit, goTo,
     setNetwork, clearNetwork,
-    showRoute, clearRoute, focusStop, clearFocus,
+    showRoute, setLines, setTrails, clearRoute, focusStop, clearFocus,
     updateBuses, clearBuses, setSelected, flyToBus, stopFollow, isFollowing,
     locate, zoomIn: () => map.zoomIn(), zoomOut: () => map.zoomOut(),
     closePopups: () => map.closePopup(),

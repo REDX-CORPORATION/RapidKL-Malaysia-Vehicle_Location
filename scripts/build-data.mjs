@@ -8,7 +8,7 @@
  *   node scripts/build-data.mjs                 # fetch latest from the repo's GitHub Pages
  *   node scripts/build-data.mjs --from ./dir    # use local copies of bus-kl.json / bus-mrtfeeder.json
  */
-import { readFile, writeFile, mkdir, rm } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, rm, access } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { titleCase, splitStopName, slugify, compareRoutes } from '../public/js/format.js';
@@ -77,7 +77,11 @@ const index = {
   generatedAt: new Date().toISOString(),
   sourceGeneratedAt: kl.generatedAt || null,
   source: 'RapidKL GTFS static (Prasarana) via data.gov.my; pre-joined by mohdsyahid/rapidkl-malaysia (MIT)',
-  routes: routes.map((r) => ({ n: r.name, l: r.label, k: r.kind, f: r.slug, s: r.dirs.reduce((a, d) => Math.max(a, d.s.length), 0) })),
+  routes: await Promise.all(routes.map(async (r) => ({
+    n: r.name, l: r.label, k: r.kind, f: r.slug, s: r.dirs.reduce((a, d) => Math.max(a, d.s.length), 0),
+    // keep the flag for routes whose road line was pre-computed with `npm run lines`
+    ...((await access(join(OUT, 'lines', r.slug + '.json')).then(() => true, () => false)) ? { ln: 1 } : {}),
+  }))),
 };
 await writeFile(join(OUT, 'index.json'), JSON.stringify(index));
 console.log(`wrote ${routes.length} routes (city+brt: ${routes.filter((r) => r.kind !== 'feeder').length}, feeder: ${routes.filter((r) => r.kind === 'feeder').length})`);
